@@ -3,7 +3,7 @@ import { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import toast from "react-hot-toast";
 import { db } from "@/lib/firebase";
-import { collection, getDocs, doc, updateDoc, addDoc } from "firebase/firestore";
+import { collection, getDocs, doc, updateDoc, addDoc, getDoc } from "firebase/firestore";
 import {
   FaPlus, FaMinus, FaShoppingCart, FaPrint, FaEdit, FaUtensils, FaLeaf, FaCocktail,
   FaStar, FaTrash, FaBoxOpen, FaPizzaSlice, FaHamburger, FaDrumstickBite, FaMugHot,
@@ -24,6 +24,7 @@ export default function RestaurantPOS() {
   const [editPrice, setEditPrice] = useState("");
   const [editSizePrices, setEditSizePrices] = useState({});
   const [isPrinting, setIsPrinting] = useState(false);
+  const [isToggling, setIsToggling] = useState(false);
   const cartRef = useRef(null);
 
   const categories = [
@@ -42,15 +43,24 @@ export default function RestaurantPOS() {
         const menuSnapshot = await getDocs(collection(db, "menu"));
         const menuData = menuSnapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
         setMenu(menuData);
+
         const startersSnapshot = await getDocs(collection(db, "starters"));
         const startersData = startersSnapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
         setStarters(startersData);
+
         const drinksSnapshot = await getDocs(collection(db, "drinks"));
         const drinksData = drinksSnapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
         setDrinks(drinksData);
+
         const ordersSnapshot = await getDocs(collection(db, "orders"));
         const ordersData = ordersSnapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
         setOrders(ordersData);
+
+        // Load admin state from localStorage
+        const savedAdminState = localStorage.getItem("isAdmin");
+        if (savedAdminState) {
+          setIsAdmin(savedAdminState === "true");
+        }
       } catch (error) {
         console.error("Error fetching data:", error);
         toast.error("Failed to fetch data from Firebase.");
@@ -66,7 +76,12 @@ export default function RestaurantPOS() {
   };
 
   const addToCart = (item) => {
-    if (item.disabled) return;
+    if (item.disabled) {
+      toast.error("This item is currently unavailable.", {
+        icon: <FaBoxOpen className="text-yellow-500" />,
+      });
+      return;
+    }
     const size = selectedSizes[item.id] || (item.sizes ? item.sizes[0].name : null);
     const price = item.sizes ? item.sizes.find((s) => s.name === size).price : item.price;
     setCart((prev) => {
@@ -85,6 +100,12 @@ export default function RestaurantPOS() {
   };
 
   const addStarterOrDrinkToCart = (item) => {
+    if (item.disabled) {
+      toast.error("This item is currently unavailable.", {
+        icon: <FaBoxOpen className="text-yellow-500" />,
+      });
+      return;
+    }
     setCart((prev) => {
       const existingItem = prev.find((i) => i.id === item.id);
       if (existingItem) {
@@ -138,6 +159,7 @@ export default function RestaurantPOS() {
         await addDoc(collection(db, "orders"), newOrder);
         setOrders((prev) => [...prev, newOrder]);
         setCart([]);
+        printReceipt(newOrder);
         toast.success("Order placed successfully! 🎉", {
           icon: <FaShoppingCart className="text-green-500" />,
         });
@@ -150,16 +172,54 @@ export default function RestaurantPOS() {
     }, 2000);
   };
 
-  const toggleItemDisabled = async (id) => {
-    const itemRef = doc(db, "menu", id);
-    const item = menu.find((i) => i.id === id);
-    if (!item) return;
-    await updateDoc(itemRef, { disabled: !item.disabled });
-    setMenu((prev) =>
-      prev.map((item) =>
-        item.id === id ? { ...item, disabled: !item.disabled } : item
-      )
-    );
+  const toggleItemDisabled = async (collectionName, id) => {
+    if (isToggling) return;
+    setIsToggling(true);
+    try {
+      const itemRef = doc(db, collectionName, String(id));
+      const docSnap = await getDoc(itemRef);
+      
+      if (!docSnap.exists()) {
+        toast.error("Item not found in database.");
+        setIsToggling(false);
+        return;
+      }
+
+      let item;
+      let setStateFunction;
+      
+      if (collectionName === "menu") {
+        item = menu.find((i) => i.id === id);
+        setStateFunction = setMenu;
+      } else if (collectionName === "starters") {
+        item = starters.find((i) => i.id === id);
+        setStateFunction = setStarters;
+      } else if (collectionName === "drinks") {
+        item = drinks.find((i) => i.id === id);
+        setStateFunction = setDrinks;
+      }
+
+      if (!item) {
+        setIsToggling(false);
+        return;
+      }
+
+      const newDisabledState = !item.disabled;
+      await updateDoc(itemRef, { disabled: newDisabledState });
+      
+      setStateFunction((prev) =>
+        prev.map((item) =>
+          item.id === id ? { ...item, disabled: newDisabledState } : item
+        )
+      );
+      
+      toast.success(`Item ${newDisabledState ? "disabled" : "enabled"} successfully!`);
+    } catch (error) {
+      console.error("Error toggling item:", error);
+      toast.error("Failed to toggle item.");
+    } finally {
+      setIsToggling(false);
+    }
   };
 
   const startEditing = (item) => {
@@ -176,7 +236,7 @@ export default function RestaurantPOS() {
   };
 
   const saveEditing = async (id) => {
-    const itemRef = doc(db, "menu", id);
+    const itemRef = doc(db, "menu", String(id));
     const updatedItem = { ...menu.find((item) => item.id === id) };
     updatedItem.name = editName;
     updatedItem.price = editPrice;
@@ -203,7 +263,7 @@ export default function RestaurantPOS() {
   };
 
   const saveEditingStarter = async (id) => {
-    const starterRef = doc(db, "starters", id);
+    const starterRef = doc(db, "starters", String(id));
     await updateDoc(starterRef, { name: editName, price: editPrice });
     setStarters((prev) =>
       prev.map((starter) =>
@@ -223,7 +283,7 @@ export default function RestaurantPOS() {
   };
 
   const saveEditingDrink = async (id) => {
-    const drinkRef = doc(db, "drinks", id);
+    const drinkRef = doc(db, "drinks", String(id));
     await updateDoc(drinkRef, { name: editName, price: editPrice });
     setDrinks((prev) =>
       prev.map((drink) =>
@@ -237,25 +297,84 @@ export default function RestaurantPOS() {
   };
 
   const printReceipt = (order) => {
-    const receipt = `
-      🍕 Pizza Master Receipt 🍕
-      --------------------------
-      Order #${order.id}
-      Date: ${order.date}
-      ${order.items
-        .map(
-          (item) =>
-            `• ${item.name} ${item.selectedSize ? `(${item.selectedSize})` : ""} x${
-              item.quantityInCart
-            }: ${item.price * item.quantityInCart} IQD`
-        )
-        .join("\n")}
-      --------------------------
-      TOTAL: ${order.total} IQD
-      --------------------------
-      Thank you for your order!
-    `;
-    alert(receipt);
+    const printWindow = window.open('', '_blank');
+    printWindow.document.write(`
+      <html>
+        <head>
+          <title>Pizza Master Receipt</title>
+          <style>
+            @media print {
+              @page { size: 58mm auto; margin: 0; }
+            }
+            body {
+              font-family: 'Courier New', monospace;
+              width: 58mm;
+              margin: 0;
+              padding: 5px;
+              font-size: 12px;
+              line-height: 1.2;
+            }
+            .header {
+              text-align: center;
+              font-weight: bold;
+              margin-bottom: 10px;
+              border-bottom: 1px dashed #000;
+              padding-bottom: 5px;
+            }
+            .items {
+              margin-bottom: 10px;
+            }
+            .item {
+              display: flex;
+              justify-content: space-between;
+              margin-bottom: 3px;
+            }
+            .total {
+              font-weight: bold;
+              margin-top: 10px;
+              border-top: 1px dashed #000;
+              padding-top: 5px;
+              text-align: right;
+            }
+            .footer {
+              text-align: center;
+              margin-top: 10px;
+              font-size: 10px;
+            }
+          </style>
+        </head>
+        <body>
+          <div class="header">
+            <div>Pizza Master</div>
+            <div>Order #${order.id}</div>
+            <div>${new Date().toLocaleString()}</div>
+          </div>
+          <div class="items">
+            ${order.items
+              .map(
+                (item) => `
+                  <div class="item">
+                    <span>${item.name} ${item.selectedSize ? `(${item.selectedSize})` : ""}</span>
+                    <span>${item.quantityInCart} x ${item.price} IQD</span>
+                  </div>
+                `
+              )
+              .join("")}
+          </div>
+          <div class="total">
+            <div>Total: ${order.total} IQD</div>
+          </div>
+          <div class="footer">
+            <div>Thank you for your order!</div>
+            <div>Visit us again!</div>
+          </div>
+        </body>
+      </html>
+    `);
+    printWindow.document.close();
+    printWindow.focus();
+    printWindow.print();
+    printWindow.close();
   };
 
   useEffect(() => {
@@ -267,11 +386,13 @@ export default function RestaurantPOS() {
   return (
     <div className="min-h-screen bg-white">
       <header className="bg-white shadow-sm sticky top-0 z-20">
-        <div className="container mx-auto px-4 py-4 flex justify-between items-center">
+        <div className="container mx-auto px-4 py-0 flex justify-between items-center">
+          <img src={`/Images/logo.jpg`} className="w-40 h-30 object-contain rounded-lg shadow-md border border-gray-200" alt="Pizza Master Logo" />
           <h1 className="text-3xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-orange-600 to-pink-600 flex items-center">
             <FaUtensils className="mr-2" /> Pizza Master
           </h1>
-          <button
+          {/* the admin button */}
+          {/* <button
             onClick={toggleAdminView}
             className={`px-6 py-3 rounded-lg text-white font-medium flex items-center shadow-sm transition-all ${
               isAdmin
@@ -281,7 +402,7 @@ export default function RestaurantPOS() {
           >
             {isAdmin ? <FaUtensils className="mr-2" /> : <FaEdit className="mr-2" />}
             {isAdmin ? "Customer View" : "Admin Panel"}
-          </button>
+          </button> */}
         </div>
       </header>
       <main className="container mx-auto px-4 py-8">
@@ -392,6 +513,7 @@ function AdminView({
             startEditing={startEditingStarter}
             saveEditing={saveEditingStarter}
             setEditingItem={setEditingItem}
+            toggleItemDisabled={toggleItemDisabled}
           />
         ) : activeCategory === "Drinks" ? (
           <DrinksAdminView
@@ -404,6 +526,7 @@ function AdminView({
             startEditing={startEditingDrink}
             saveEditing={saveEditingDrink}
             setEditingItem={setEditingItem}
+            toggleItemDisabled={toggleItemDisabled}
           />
         ) : (
           <MenuAdminView
@@ -436,13 +559,14 @@ function StartersAdminView({
   startEditing,
   saveEditing,
   setEditingItem,
+  toggleItemDisabled,
 }) {
   return (
     <div className="space-y-4">
       <h3 className="text-xl font-semibold mb-4 text-gray-800">Starters</h3>
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         {items.map((item) => (
-          <div key={item.id} className="p-4 border border-gray-200 rounded-lg bg-white shadow-sm">
+          <div key={item.id} className={`p-4 border border-gray-200 rounded-lg bg-white shadow-sm ${item.disabled ? "opacity-60" : ""}`}>
             {editingItem === item.id ? (
               <EditForm
                 editName={editName}
@@ -456,6 +580,8 @@ function StartersAdminView({
               <ItemDisplay
                 item={item}
                 onEdit={() => startEditing(item)}
+                onToggle={() => toggleItemDisabled("starters", item.id)}
+                isMenuItem={false}
               />
             )}
           </div>
@@ -475,13 +601,14 @@ function DrinksAdminView({
   startEditing,
   saveEditing,
   setEditingItem,
+  toggleItemDisabled,
 }) {
   return (
     <div className="space-y-4">
       <h3 className="text-xl font-semibold mb-4 text-gray-800">Drinks</h3>
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         {items.map((item) => (
-          <div key={item.id} className="p-4 border border-gray-200 rounded-lg bg-white shadow-sm">
+          <div key={item.id} className={`p-4 border border-gray-200 rounded-lg bg-white shadow-sm ${item.disabled ? "opacity-60" : ""}`}>
             {editingItem === item.id ? (
               <EditForm
                 editName={editName}
@@ -495,6 +622,8 @@ function DrinksAdminView({
               <ItemDisplay
                 item={item}
                 onEdit={() => startEditing(item)}
+                onToggle={() => toggleItemDisabled("drinks", item.id)}
+                isMenuItem={false}
               />
             )}
           </div>
@@ -539,8 +668,8 @@ function MenuAdminView({
               <ItemDisplay
                 item={item}
                 onEdit={() => startEditing(item)}
-                onToggle={() => toggleItemDisabled(item.id)}
-                isMenuItem
+                onToggle={() => toggleItemDisabled("menu", item.id)}
+                isMenuItem={true}
               />
             )}
           </div>
@@ -568,7 +697,7 @@ function EditForm({
           type="text"
           value={editName}
           onChange={(e) => setEditName(e.target.value)}
-          className="flex-1 p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+          className="flex-1 p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-black"
           placeholder="Item name"
         />
         {!item?.sizes ? (
@@ -576,7 +705,7 @@ function EditForm({
             type="number"
             value={editPrice}
             onChange={(e) => setEditPrice(e.target.value)}
-            className="w-24 p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            className="w-24 p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-black"
             placeholder="Price"
           />
         ) : null}
@@ -595,7 +724,7 @@ function EditForm({
                     [size.name]: e.target.value,
                   })
                 }
-                className="w-20 p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                className="w-20 p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-black"
                 placeholder="Price"
               />
             </div>
@@ -625,14 +754,14 @@ function ItemDisplay({ item, onEdit, onToggle, isMenuItem }) {
     <>
       <div className="flex justify-between items-start mb-2">
         <h3 className="font-bold text-lg text-gray-800 flex-1">{item.name}</h3>
-        {isMenuItem && (
-          <button
-            onClick={onToggle}
-            className={`p-2 rounded-lg ${item.disabled ? "bg-red-100 text-red-500" : "bg-green-100 text-green-500"}`}
-          >
-            {item.disabled ? <FaToggleOff /> : <FaToggleOn />}
-          </button>
-        )}
+        <button
+          onClick={onToggle}
+          className={`p-3 rounded-lg text-white flex items-center justify-center shadow-sm transition-all transform active:scale-95 ${
+            item.disabled ? "bg-red-500 hover:bg-red-600" : "bg-green-500 hover:bg-green-600"
+          }`}
+        >
+          {item.disabled ? <FaToggleOff className="text-lg" /> : <FaToggleOn className="text-lg" />}
+        </button>
       </div>
       {isMenuItem && item.sizes ? (
         <div className="flex flex-wrap gap-2 mb-4">
@@ -765,15 +894,24 @@ function CustomerView({
             {starters.map((starter) => (
               <div
                 key={starter.id}
-                onClick={() => addStarterOrDrinkToCart(starter)}
-                className="bg-gray-50 p-3 rounded-lg flex items-center space-x-3 cursor-pointer hover:bg-gray-100 transition-colors hover:shadow-sm"
+                onClick={() => !starter.disabled && addStarterOrDrinkToCart(starter)}
+                className={`bg-gray-50 p-3 rounded-lg flex items-center space-x-3 cursor-pointer hover:bg-gray-100 transition-colors hover:shadow-sm ${
+                  starter.disabled ? "opacity-60 cursor-not-allowed" : ""
+                }`}
               >
                 <img src={`/Images/${starter.id}.jpg`} alt={starter.name} className="w-20 h-20 object-cover rounded-lg mr-3" />
                 <div className="flex-1">
                   <p className="font-medium text-lg">{starter.name}</p>
                   <p className="text-sm text-gray-600">{starter.price} IQD</p>
                 </div>
-                <button className="bg-gradient-to-r from-green-100 to-emerald-100 text-green-800 p-2 rounded-lg hover:from-green-200 hover:to-emerald-200 transition-colors">
+                <button
+                  className={`p-2 rounded-lg transition-colors ${
+                    starter.disabled
+                      ? "bg-gray-200 text-gray-400 cursor-not-allowed"
+                      : "bg-gradient-to-r from-green-100 to-emerald-100 text-green-800 hover:from-green-200 hover:to-emerald-200"
+                  }`}
+                  disabled={starter.disabled}
+                >
                   <FaPlus className="text-lg" />
                 </button>
               </div>
@@ -786,15 +924,24 @@ function CustomerView({
             {drinks.map((drink) => (
               <div
                 key={drink.id}
-                onClick={() => addStarterOrDrinkToCart(drink)}
-                className="bg-gray-50 p-3 rounded-lg flex items-center space-x-3 cursor-pointer hover:bg-gray-100 transition-colors hover:shadow-sm"
+                onClick={() => !drink.disabled && addStarterOrDrinkToCart(drink)}
+                className={`bg-gray-50 p-3 rounded-lg flex items-center space-x-3 cursor-pointer hover:bg-gray-100 transition-colors hover:shadow-sm ${
+                  drink.disabled ? "opacity-60 cursor-not-allowed" : ""
+                }`}
               >
                 <img src={`/Images/${drink.id}.jpg`} alt={drink.name} className="w-20 h-20 object-cover rounded-lg mr-3" />
                 <div className="flex-1">
                   <p className="font-medium text-lg">{drink.name}</p>
                   <p className="text-sm text-gray-600">{drink.price} IQD</p>
                 </div>
-                <button className="bg-gradient-to-r from-blue-100 to-indigo-100 text-blue-800 p-2 rounded-lg hover:from-blue-200 hover:to-indigo-200 transition-colors">
+                <button
+                  className={`p-2 rounded-lg transition-colors ${
+                    drink.disabled
+                      ? "bg-gray-200 text-gray-400 cursor-not-allowed"
+                      : "bg-gradient-to-r from-blue-100 to-indigo-100 text-blue-800 hover:from-blue-200 hover:to-indigo-200"
+                  }`}
+                  disabled={drink.disabled}
+                >
                   <FaPlus className="text-lg" />
                 </button>
               </div>
