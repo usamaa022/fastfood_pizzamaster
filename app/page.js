@@ -35,7 +35,16 @@ import {
   FaSave,
   FaTimes,
   FaRedo,
+  FaCalendarAlt,
+  FaSearch,
+  FaChartBar,
+  FaChartPie,
 } from "react-icons/fa";
+import { Chart as ChartJS, ArcElement, Tooltip, Legend, CategoryScale, LinearScale, Title, BarElement } from "chart.js";
+import { Pie, Bar } from "react-chartjs-2";
+
+// Register the required components
+ChartJS.register(ArcElement, Tooltip, Legend, CategoryScale, LinearScale, Title, BarElement);
 
 export default function RestaurantPOS() {
   // State declarations
@@ -53,18 +62,40 @@ export default function RestaurantPOS() {
   const [editSizePrices, setEditSizePrices] = useState({});
   const [isPrinting, setIsPrinting] = useState(false);
   const [isToggling, setIsToggling] = useState(false);
-  const [orderIdInput, setOrderIdInput] = useState("");
-  const [fetchedOrder, setFetchedOrder] = useState(null);
   const [isFetching, setIsFetching] = useState(false);
   const [nextOrderId, setNextOrderId] = useState(1);
   const [isEditingOrder, setIsEditingOrder] = useState(false);
+  const [deliveryFee, setDeliveryFee] = useState("");
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
+  const [filteredOrders, setFilteredOrders] = useState([]);
+  const [fetchedOrder, setFetchedOrder] = useState(null);
+  const [orderIdSearch, setOrderIdSearch] = useState("");
+  const [selectedMonth, setSelectedMonth] = useState(new Date().getMonth());
+  const [salesData, setSalesData] = useState({});
+  const [monthlySales, setMonthlySales] = useState({});
+  const [isFiltered, setIsFiltered] = useState(false);
   const cartRef = useRef(null);
+
+  const months = [
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December"
+  ];
+
+  const colors = [
+    '#FF6384', '#36A2EB', '#FFCE56', '#4BC0C0', '#9966FF',
+    '#FF9F40', '#8AC24A', '#FF6B6B', '#4ECDC4', '#45B7D1',
+    '#FFBE0B', '#FB5607', '#8338EC', '#3A86FF', '#FF006E',
+    '#A5DD9B', '#F9C74F', '#90BE6D', '#43AA8B', '#577590'
+  ];
 
   // Load next order ID from localStorage
   useEffect(() => {
     const savedOrderId = localStorage.getItem("nextOrderId");
     if (savedOrderId) {
       setNextOrderId(parseInt(savedOrderId));
+    } else {
+      localStorage.setItem("nextOrderId", "1");
     }
   }, []);
 
@@ -119,6 +150,7 @@ export default function RestaurantPOS() {
         const ordersSnapshot = await getDocs(collection(db, "orders"));
         const ordersData = ordersSnapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
         setOrders(ordersData);
+        setFilteredOrders(ordersData);
         // Load admin state from localStorage
         const savedAdminState = localStorage.getItem("isAdmin");
         if (savedAdminState) {
@@ -131,6 +163,47 @@ export default function RestaurantPOS() {
     };
     fetchData();
   }, []);
+
+  // Calculate sales data for chart
+  useEffect(() => {
+    const calculateSalesData = () => {
+      const data = {
+        food: 0,
+        drinks: 0,
+        delivery: 0,
+      };
+      const monthlyData = {};
+      orders.forEach((order) => {
+        const orderDate = new Date(order.date);
+        const monthKey = `${orderDate.getFullYear()}-${orderDate.getMonth()}`;
+        if (!monthlyData[monthKey]) {
+          monthlyData[monthKey] = { food: {}, drinks: {}, delivery: 0, total: 0 };
+        }
+        order.items.forEach((item) => {
+          const key = item.sizes ? `${item.name}-${item.selectedSize}` : item.name;
+          if (item.category) {
+            if (!monthlyData[monthKey].food[key]) {
+              monthlyData[monthKey].food[key] = 0;
+            }
+            monthlyData[monthKey].food[key] += item.price * item.quantityInCart;
+            data.food += item.price * item.quantityInCart;
+          } else {
+            if (!monthlyData[monthKey].drinks[key]) {
+              monthlyData[monthKey].drinks[key] = 0;
+            }
+            monthlyData[monthKey].drinks[key] += item.price * item.quantityInCart;
+            data.drinks += item.price * item.quantityInCart;
+          }
+        });
+        monthlyData[monthKey].delivery += order.deliveryFee || 0;
+        monthlyData[monthKey].total += order.total;
+        data.delivery += order.deliveryFee || 0;
+      });
+      setSalesData(data);
+      setMonthlySales(monthlyData);
+    };
+    calculateSalesData();
+  }, [orders]);
 
   // Add item to cart
   const addToCart = (item) => {
@@ -210,52 +283,75 @@ export default function RestaurantPOS() {
       return;
     }
     setIsPrinting(true);
-    setTimeout(async () => {
-      try {
-        if (isEditingOrder) {
-          // Update existing order
-          const ordersRef = collection(db, "orders");
-          const q = query(ordersRef, where("id", "==", fetchedOrder.id));
-          const querySnapshot = await getDocs(q);
-          if (!querySnapshot.empty) {
-            const orderDocRef = doc(db, "orders", querySnapshot.docs[0].id);
-            await updateDoc(orderDocRef, {
-              items: cart,
-              total: cart.reduce((sum, item) => sum + item.price * item.quantityInCart, 0),
-            });
-            toast.success(`Order #${fetchedOrder.id} updated successfully! 🎉`, {
-              icon: <FaShoppingCart className="text-green-500" />,
-            });
-            printReceipt({ ...fetchedOrder, items: cart, total: cart.reduce((sum, item) => sum + item.price * item.quantityInCart, 0) });
-            setCart([]);
-            setIsEditingOrder(false);
-            setFetchedOrder(null);
-          } else {
-            toast.error("Order not found.");
-          }
-        } else {
-          // Place new order
-          const newOrder = {
-            id: generateOrderId(),
+    try {
+      const subtotal = cart.reduce((sum, item) => sum + item.price * item.quantityInCart, 0);
+      const fee = parseFloat(deliveryFee) || 0;
+      const total = subtotal + fee;
+
+      if (isEditingOrder && fetchedOrder) {
+        // Update existing order
+        const ordersRef = collection(db, "orders");
+        const q = query(ordersRef, where("id", "==", fetchedOrder.id));
+        const querySnapshot = await getDocs(q);
+        if (!querySnapshot.empty) {
+          const orderDocRef = doc(db, "orders", querySnapshot.docs[0].id);
+          await updateDoc(orderDocRef, {
             items: cart,
-            total: cart.reduce((sum, item) => sum + item.price * item.quantityInCart, 0),
-            date: new Date().toLocaleString(),
-          };
-          await addDoc(collection(db, "orders"), newOrder);
-          setOrders((prev) => [...prev, newOrder]);
-          printReceipt(newOrder);
-          toast.success(`Order #${newOrder.id} placed successfully! 🎉`, {
+            subtotal,
+            deliveryFee: fee,
+            total,
+          });
+          toast.success(`Order #${fetchedOrder.id} updated successfully! 🎉`, {
             icon: <FaShoppingCart className="text-green-500" />,
           });
+          printReceipt({ ...fetchedOrder, items: cart, subtotal, deliveryFee: fee, total });
+          setOrders((prev) =>
+            prev.map((o) =>
+              o.id === fetchedOrder.id
+                ? { ...o, items: cart, subtotal, deliveryFee: fee, total }
+                : o
+            )
+          );
+          setFilteredOrders((prev) =>
+            prev.map((o) =>
+              o.id === fetchedOrder.id
+                ? { ...o, items: cart, subtotal, deliveryFee: fee, total }
+                : o
+            )
+          );
           setCart([]);
+          setIsEditingOrder(false);
+          setFetchedOrder(null);
+          setDeliveryFee("");
+        } else {
+          toast.error("Order not found.");
         }
-      } catch (error) {
-        console.error("Error placing/updating order:", error);
-        toast.error("Failed to place/update order.");
-      } finally {
-        setIsPrinting(false);
+      } else {
+        // Place new order
+        const newOrder = {
+          id: generateOrderId(),
+          items: cart,
+          subtotal,
+          deliveryFee: fee,
+          total,
+          date: new Date().toLocaleString(),
+        };
+        await addDoc(collection(db, "orders"), newOrder);
+        setOrders((prev) => [newOrder, ...prev]);
+        setFilteredOrders((prev) => [newOrder, ...prev]);
+        printReceipt(newOrder);
+        toast.success(`Order #${newOrder.id} placed successfully! 🎉`, {
+          icon: <FaShoppingCart className="text-green-500" />,
+        });
+        setCart([]);
+        setDeliveryFee("");
       }
-    }, 2000);
+    } catch (error) {
+      console.error("Error placing/updating order:", error);
+      toast.error("Failed to place/update order.");
+    } finally {
+      setIsPrinting(false);
+    }
   };
 
   // Toggle item availability
@@ -448,8 +544,11 @@ export default function RestaurantPOS() {
                 `
               )
               .join("")}
+            ${order.deliveryFee > 0 ? `<div class="item"><span>Delivery Fee</span><span>${order.deliveryFee} IQD</span></div>` : ''}
           </div>
           <div class="total">
+            <div>Subtotal: ${order.subtotal} IQD</div>
+            ${order.deliveryFee > 0 ? `<div>Delivery: ${order.deliveryFee} IQD</div>` : ''}
             <div>Total: ${order.total} IQD</div>
           </div>
           <div class="footer">
@@ -466,33 +565,114 @@ export default function RestaurantPOS() {
     printWindow.close();
   };
 
-  // Fetch order by ID
-  const fetchOrderById = async () => {
-    if (!orderIdInput) {
-      toast.error("Please enter an Order ID.");
+  // Print all orders
+  const printAllOrders = () => {
+    const ordersToPrint = filteredOrders.length > 0 ? filteredOrders : orders;
+    if (ordersToPrint.length === 0) {
+      toast.error("No orders to print.");
       return;
     }
-    setIsFetching(true);
-    try {
-      const orderId = orderIdInput.padStart(3, '0');
-      const ordersRef = collection(db, "orders");
-      const q = query(ordersRef, where("id", "==", orderId));
-      const querySnapshot = await getDocs(q);
-      if (!querySnapshot.empty) {
-        const orderDoc = querySnapshot.docs[0];
-        const orderData = { id: orderDoc.id, ...orderDoc.data() };
-        setFetchedOrder(orderData);
-        setCart(orderData.items);
-        setIsEditingOrder(true);
-        toast.success(`Order #${orderId} fetched successfully!`);
-      } else {
-        toast.error("Order not found.");
-      }
-    } catch (error) {
-      console.error("Error fetching order:", error);
-      toast.error("Failed to fetch order.");
-    } finally {
-      setIsFetching(false);
+    const printWindow = window.open('', '_blank');
+    printWindow.document.write(`
+      <html>
+        <head>
+          <title>Pizza Master - All Orders</title>
+          <style>
+            @media print {
+              @page { size: 58mm auto; margin: 0; }
+            }
+            body {
+              font-family: 'Courier New', monospace;
+              width: 58mm;
+              margin: 0;
+              padding: 5px;
+              font-size: 12px;
+              line-height: 1.2;
+              color: #000;
+            }
+            .order {
+              margin-bottom: 20px;
+              border-bottom: 1px dashed #000;
+              padding-bottom: 10px;
+            }
+            .header {
+              text-align: center;
+              font-weight: bold;
+              margin-bottom: 5px;
+            }
+            .items {
+              margin: 5px 0;
+            }
+            .item {
+              display: flex;
+              justify-content: space-between;
+              margin-bottom: 3px;
+            }
+            .total {
+              font-weight: bold;
+              text-align: right;
+              margin-top: 5px;
+            }
+            .footer {
+              text-align: center;
+              margin-top: 10px;
+              font-size: 10px;
+            }
+          </style>
+        </head>
+        <body>
+          <div class="header">
+            <div>Pizza Master</div>
+            <div>All Orders</div>
+            <div>${new Date().toLocaleString()}</div>
+          </div>
+          ${ordersToPrint.map((order) => `
+            <div class="order">
+              <div class="header">
+                <div>Order #${order.id}</div>
+                <div>${new Date(order.date).toLocaleString()}</div>
+              </div>
+              <div class="items">
+                ${order.items.map((item) => `
+                  <div class="item">
+                    <span>${item.name} ${item.selectedSize ? `(${item.selectedSize})` : ""}</span>
+                    <span>${item.quantityInCart} x ${item.price} IQD</span>
+                  </div>
+                `).join("")}
+                ${order.deliveryFee > 0 ? `<div class="item"><span>Delivery Fee</span><span>${order.deliveryFee} IQD</span></div>` : ''}
+              </div>
+              <div class="total">
+                <div>Subtotal: ${order.subtotal} IQD</div>
+                ${order.deliveryFee > 0 ? `<div>Delivery: ${order.deliveryFee} IQD</div>` : ''}
+                <div>Total: ${order.total} IQD</div>
+              </div>
+            </div>
+          `).join("")}
+          <div class="footer">
+            <div>Total Orders: ${ordersToPrint.length}</div>
+            <div>Total Delivery Fee: ${ordersToPrint.reduce((sum, order) => sum + (order.deliveryFee || 0), 0)} IQD</div>
+            <div>Total Sales: ${ordersToPrint.reduce((sum, order) => sum + order.total, 0)} IQD</div>
+            <div>Thank you!</div>
+          </div>
+        </body>
+      </html>
+    `);
+    printWindow.document.close();
+    printWindow.focus();
+    printWindow.print();
+  };
+
+  // Fetch order by ID (for Order History)
+  const fetchOrderById = (orderId) => {
+    const order = orders.find((o) => o.id === orderId);
+    if (order) {
+      setCart(order.items);
+      setDeliveryFee(order.deliveryFee || "");
+      setIsEditingOrder(true);
+      setFetchedOrder(order);
+      toast.success(`Order #${orderId} loaded for editing!`);
+    } else {
+      toast.error("Order not found.");
     }
   };
 
@@ -505,11 +685,45 @@ export default function RestaurantPOS() {
         await deleteDoc(doc.ref);
       });
       setOrders([]);
+      setFilteredOrders([]);
       toast.success("All orders cleared for the day!");
     } catch (error) {
       console.error("Error clearing orders:", error);
       toast.error("Failed to clear orders.");
     }
+  };
+
+  // Filter orders by date range or ID
+  const handleFilter = () => {
+    if (isFiltered) {
+      setFromDate("");
+      setToDate("");
+      setOrderIdSearch("");
+      setFilteredOrders(orders);
+      setIsFiltered(false);
+      return;
+    }
+
+    if (!fromDate && !toDate && !orderIdSearch) {
+      setFilteredOrders(orders);
+      return;
+    }
+
+    const [fromDay, fromMonth, fromYear] = fromDate.split('/').map(Number);
+    const [toDay, toMonth, toYear] = toDate.split('/').map(Number);
+
+    const from = fromDate ? new Date(fromYear, fromMonth - 1, fromDay) : new Date(0);
+    const to = toDate ? new Date(toYear, toMonth - 1, toDay, 23, 59, 59) : new Date();
+
+    const filtered = orders.filter((order) => {
+      const orderDate = new Date(order.date);
+      const matchesDate = orderDate >= from && orderDate <= to;
+      const matchesId = orderIdSearch ? order.id === orderIdSearch : true;
+      return matchesDate && matchesId;
+    });
+
+    setFilteredOrders(filtered);
+    setIsFiltered(true);
   };
 
   // Auto-scroll cart
@@ -519,12 +733,72 @@ export default function RestaurantPOS() {
     }
   }, [cart]);
 
+  // Chart data for monthly sales
+  const getMonthlySalesChartData = () => {
+    const monthKey = `${new Date().getFullYear()}-${selectedMonth}`;
+    const monthData = monthlySales[monthKey] || { food: {}, drinks: {}, delivery: 0, total: 0 };
+
+    const foodLabels = Object.keys(monthData.food);
+    const foodValues = Object.values(monthData.food);
+    const drinkLabels = Object.keys(monthData.drinks);
+    const drinkValues = Object.values(monthData.drinks);
+
+    const labels = [...foodLabels, ...drinkLabels, "Delivery Fee"];
+    const data = [...foodValues, ...drinkValues, monthData.delivery];
+
+    const backgroundColors = foodLabels.map((_, index) => colors[index % colors.length])
+      .concat(drinkLabels.map((_, index) => colors[(index + foodLabels.length) % colors.length]))
+      .concat(['#FFCE56']);
+
+    return {
+      labels,
+      datasets: [
+        {
+          data,
+          backgroundColor: backgroundColors,
+          borderColor: backgroundColors,
+          borderWidth: 1,
+        },
+      ],
+    };
+  };
+
+  const getBarChartData = () => {
+    const monthKey = `${new Date().getFullYear()}-${selectedMonth}`;
+    const monthData = monthlySales[monthKey] || { food: {}, drinks: {}, delivery: 0, total: 0 };
+
+    const foodLabels = Object.keys(monthData.food);
+    const foodValues = Object.values(monthData.food);
+    const drinkLabels = Object.keys(monthData.drinks);
+    const drinkValues = Object.values(monthData.drinks);
+
+    const labels = [...foodLabels, ...drinkLabels, "Delivery Fee"];
+    const data = [...foodValues, ...drinkValues, monthData.delivery];
+
+    const backgroundColors = foodLabels.map((_, index) => colors[index % colors.length])
+      .concat(drinkLabels.map((_, index) => colors[(index + foodLabels.length) % colors.length]))
+      .concat(['#FFCE56']);
+
+    return {
+      labels,
+      datasets: [
+        {
+          label: 'Sales (IQD)',
+          data,
+          backgroundColor: backgroundColors,
+          borderColor: backgroundColors,
+          borderWidth: 1,
+        },
+      ],
+    };
+  };
+
   return (
     <div className="min-h-screen bg-gray-50">
       <header className="bg-white shadow-sm sticky top-0 z-20">
         <div className="container mx-auto px-4 py-4 flex justify-between items-center">
           <img src={`/Images/logo.jpg`} className="w-40 h-20 object-contain rounded-lg shadow-md border border-gray-200" alt="Pizza Master Logo" />
-          <h1 className="text-3xl font-bold text-gray-800 flex items-center">
+          <h1 className="text-3xl font-bold text-black flex items-center">
             <FaUtensils className="mr-2 text-orange-600" /> Pizza Master
           </h1>
           <button
@@ -568,10 +842,10 @@ export default function RestaurantPOS() {
           />
         ) : (
           <div className="grid grid-cols-12 gap-8">
-            {/* MAIN MENU SECTION - Wider column (8/12)  categoryyy*/}
+            {/* MAIN MENU SECTION */}
             <div className="col-span-12 lg:col-span-5">
               <div className="mb-8">
-                <h2 className="text-3xl font-bold mb-6 flex items-center text-gray-800">
+                <h2 className="text-3xl font-bold mb-6 flex items-center text-black">
                   <FaUtensils className="mr-3 text-orange-600" /> Menu
                 </h2>
                 <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 mb-6">
@@ -581,8 +855,8 @@ export default function RestaurantPOS() {
                       onClick={() => setActiveCategory(category.name)}
                       className={`px-4 py-3 rounded-lg font-medium transition-all flex items-center justify-center ${
                         activeCategory === category.name
-                          ? `${category.color} text-gray-800 shadow-md border border-gray-200`
-                          : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+                          ? `${category.color} text-black shadow-md border border-gray-200`
+                          : "bg-gray-100 text-black hover:bg-gray-200"
                       }`}
                     >
                       {category.icon && <span className="mr-2">{category.icon}</span>}
@@ -591,7 +865,7 @@ export default function RestaurantPOS() {
                   ))}
                 </div>
               </div>
-              {/* MAIN MENU ITEMS GRID - Changed to 2 items per row */}
+              {/* MAIN MENU ITEMS GRID */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
                 <AnimatePresence>
                   {menu
@@ -611,7 +885,7 @@ export default function RestaurantPOS() {
                           <img src={`/Images/${item.id}.jpg`} alt={item.name} className="w-full h-full object-cover" />
                         </div>
                         <div className="p-4 flex-1 flex flex-col">
-                          <h3 className="font-bold text-xl mb-2 flex-1 text-gray-800">{item.name}</h3>
+                          <h3 className="font-bold text-xl mb-2 flex-1 text-black">{item.name}</h3>
                           {item.sizes ? (
                             <div className="flex flex-col space-y-2 mb-4 flex-1">
                               <div className="grid grid-cols-3 gap-2">
@@ -622,8 +896,8 @@ export default function RestaurantPOS() {
                                     disabled={item.disabled}
                                     className={`px-2 py-1 rounded-lg text-sm font-medium transition-colors ${
                                       selectedSizes[item.id] === size.name
-                                        ? "bg-teal-100 text-teal-800 border border-teal-300"
-                                        : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+                                        ? "bg-teal-100 text-black border border-teal-300"
+                                        : "bg-gray-100 text-black hover:bg-gray-200"
                                     } ${item.disabled ? "cursor-not-allowed" : ""}`}
                                   >
                                     {size.name} ({size.price} IQD)
@@ -632,7 +906,7 @@ export default function RestaurantPOS() {
                               </div>
                             </div>
                           ) : (
-                            <p className="text-gray-600 font-medium text-lg mb-4 flex-1">{item.price} IQD</p>
+                            <p className="text-gray-800 font-medium text-lg mb-4 flex-1">{item.price} IQD</p>
                           )}
                           <button
                             onClick={() => addToCart(item)}
@@ -651,11 +925,11 @@ export default function RestaurantPOS() {
                 </AnimatePresence>
               </div>
             </div>
-            {/* STARTERS & DRINKS SECTION - Stacked vertically in same column */}
+            {/* STARTERS & DRINKS SECTION */}
             <div className="col-span-12 lg:col-span-3 space-y-6">
               {/* STARTERS SECTION */}
               <div className="bg-white p-4 rounded-xl shadow-sm h-fit">
-                <h2 className="text-xl font-bold mb-4 flex items-center text-gray-800 justify-between border-b pb-2">
+                <h2 className="text-xl font-bold mb-4 flex items-center text-black justify-between border-b pb-2">
                   <span className="flex items-center">
                     <FaLeaf className="mr-2 text-green-500" /> Starters
                   </span>
@@ -672,7 +946,7 @@ export default function RestaurantPOS() {
                       <img src={`/Images/${starter.id}.jpg`} alt={starter.name} className="w-16 h-16 object-cover rounded-lg mr-3" />
                       <div className="flex-1">
                         <p className="font-medium text-lg text-black">{starter.name}</p>
-                        <p className="text-md text-gray-600">{starter.price} IQD</p>
+                        <p className="text-md text-gray-800">{starter.price} IQD</p>
                       </div>
                       <button
                         className={`p-2 rounded-lg transition-colors ${
@@ -690,7 +964,7 @@ export default function RestaurantPOS() {
               </div>
               {/* DRINKS SECTION */}
               <div className="bg-white p-4 rounded-xl shadow-sm h-fit">
-                <h2 className="text-xl font-bold mb-4 flex items-center text-gray-800 justify-between border-b pb-2">
+                <h2 className="text-xl font-bold mb-4 flex items-center text-black justify-between border-b pb-2">
                   <span className="flex items-center">
                     <FaMugHot className="mr-2 text-blue-500" /> Drinks
                   </span>
@@ -707,7 +981,7 @@ export default function RestaurantPOS() {
                       <img src={`/Images/${drink.id}.jpg`} alt={drink.name} className="w-16 h-16 object-cover rounded-lg mr-3" />
                       <div className="flex-1">
                         <p className="font-medium text-lg text-black">{drink.name}</p>
-                        <p className="text-md text-gray-600">{drink.price} IQD</p>
+                        <p className="text-md text-gray-800">{drink.price} IQD</p>
                       </div>
                       <button
                         className={`p-2 rounded-lg transition-colors ${
@@ -724,9 +998,9 @@ export default function RestaurantPOS() {
                 </div>
               </div>
             </div>
-            {/* CART SECTION - Extended width */}
+            {/* CART SECTION */}
             <div className="col-span-12 lg:col-span-4 bg-white p-4 rounded-xl shadow-sm h-[calc(100vh-120px)] sticky top-16 flex flex-col">
-              <h2 className="text-xl font-bold mb-4 flex items-center text-gray-800 justify-center border-b pb-2">
+              <h2 className="text-xl font-bold mb-4 flex items-center text-black justify-center border-b pb-2">
                 <FaShoppingCart className="mr-2 text-purple-600" /> Your Cart
               </h2>
               {cart.length === 0 ? (
@@ -735,7 +1009,7 @@ export default function RestaurantPOS() {
                     <FaShoppingCart className="text-5xl text-gray-300 mx-auto mb-3" />
                     <p className="text-gray-800 font-medium text-lg">Your cart is empty</p>
                   </div>
-                  <p className="text-gray-600">Add items to your cart to place an order</p>
+                  <p className="text-gray-800">Add items to your cart to place an order</p>
                 </div>
               ) : (
                 <>
@@ -754,10 +1028,10 @@ export default function RestaurantPOS() {
                           className="w-16 h-16 object-cover rounded-lg mr-4"
                         />
                         <div className="flex-1 min-w-0">
-                          <h3 className="font-semibold text-lg break-words text-gray-800">
+                          <h3 className="font-semibold text-lg break-words text-black">
                             {item.name} {item.selectedSize ? `(${item.selectedSize})` : ""}
                           </h3>
-                          <p className="text-sm text-gray-600 mt-1">
+                          <p className="text-sm text-gray-800 mt-1">
                             {item.price * item.quantityInCart} IQD
                           </p>
                         </div>
@@ -769,7 +1043,7 @@ export default function RestaurantPOS() {
                             >
                               <FaMinus className="text-lg" />
                             </button>
-                            <span className="text-lg font-medium w-8 text-center text-gray-800">
+                            <span className="text-lg font-medium w-8 text-center text-black">
                               {item.quantityInCart}
                             </span>
                             <button
@@ -791,9 +1065,25 @@ export default function RestaurantPOS() {
                   </div>
                   <div className="border-t border-gray-200 pt-4 mt-auto">
                     <div className="flex justify-between items-center mb-4">
-                      <span className="font-bold text-xl text-gray-800">Total:</span>
+                      <span className="font-bold text-xl text-black">Subtotal:</span>
                       <span className="font-bold text-xl text-purple-600">
                         {cart.reduce((sum, item) => sum + item.price * item.quantityInCart, 0)} IQD
+                      </span>
+                    </div>
+                    <div className="flex justify-between items-center mb-4">
+                      <span className="font-bold text-lg text-black">Delivery Fee:</span>
+                      <input
+                        type="number"
+                        value={deliveryFee}
+                        onChange={(e) => setDeliveryFee(e.target.value)}
+                        placeholder="0"
+                        className="w-24 p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 text-right"
+                      />
+                    </div>
+                    <div className="flex justify-between items-center mb-4">
+                      <span className="font-bold text-xl text-black">Total:</span>
+                      <span className="font-bold text-xl text-purple-600">
+                        {cart.reduce((sum, item) => sum + item.price * item.quantityInCart, 0) + (parseFloat(deliveryFee) || 0)} IQD
                       </span>
                     </div>
                     <button
@@ -826,52 +1116,188 @@ export default function RestaurantPOS() {
                   </div>
                 </>
               )}
-              <div className="mt-4 p-4 bg-gray-100 rounded-xl shadow-sm">
-                <h2 className="text-xl font-bold mb-4 flex items-center text-gray-800">
-                  <FaBoxOpen className="mr-2 text-yellow-600" /> Past Orders
-                </h2>
-                <div className="flex space-x-2">
-                  <input
-                    type="text"
-                    value={orderIdInput}
-                    onChange={(e) => setOrderIdInput(e.target.value)}
-                    placeholder="Enter Order ID "
-                    className="flex-1 p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 text-gray-800"
-                  />
-                  <button
-                    onClick={fetchOrderById}
-                    disabled={isFetching}
-                    className={`px-4 py-2 rounded-lg font-medium flex items-center ${
-                      isFetching
-                        ? "bg-gray-300 cursor-not-allowed"
-                        : "bg-gradient-to-r from-blue-500 to-indigo-500 text-white hover:shadow-md"
-                    }`}
-                  >
-                    {isFetching ? (
-                      <>
-                        <FaPrint className="mr-2" /> Fetching...
-                      </>
-                    ) : (
-                      <>
-                        <FaBoxOpen className="mr-2" /> Fetch Order
-                      </>
-                    )}
-                  </button>
-                </div>
-                <button
-                  onClick={resetOrderId}
-                  className="mt-4 px-4 py-2 bg-gradient-to-r from-red-500 to-pink-500 text-white rounded-lg flex items-center justify-center w-full"
-                >
-                  <FaRedo className="mr-2" /> Reset Order ID
-                </button>
-              </div>
             </div>
           </div>
         )}
       </main>
+      {/* ORDER HISTORY SECTION */}
+      <div className="container mx-auto px-4 py-8">
+        <div className="bg-white p-6 rounded-xl shadow-sm">
+          <h2 className="text-2xl font-bold mb-6 flex items-center text-black">
+            <FaCalendarAlt className="mr-3 text-yellow-600" /> Order History
+          </h2>
+          <div className="flex flex-col md:flex-row space-y-4 md:space-y-0 md:space-x-4 mb-6">
+            <div className="flex-1">
+              <label className="block text-black font-medium mb-2">From</label>
+              <input
+                type="text"
+                value={fromDate}
+                onChange={(e) => setFromDate(e.target.value)}
+                placeholder="dd/mm/yyyy"
+                className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 text-black"
+              />
+            </div>
+            <div className="flex-1">
+              <label className="block text-black font-medium mb-2">To</label>
+              <input
+                type="text"
+                value={toDate}
+                onChange={(e) => setToDate(e.target.value)}
+                placeholder="dd/mm/yyyy"
+                className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 text-black"
+              />
+            </div>
+            <div className="flex-1">
+              <label className="block text-black font-medium mb-2">Order ID</label>
+              <input
+                type="text"
+                value={orderIdSearch}
+                onChange={(e) => setOrderIdSearch(e.target.value)}
+                placeholder="e.g. 001"
+                className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 text-black"
+              />
+            </div>
+            <div className="flex items-end">
+              <button
+                onClick={handleFilter}
+                className={`px-6 py-3 rounded-lg font-medium flex items-center ${
+                  isFiltered
+                    ? "bg-gradient-to-r from-red-500 to-pink-500 text-white hover:shadow-md"
+                    : "bg-gradient-to-r from-blue-500 to-indigo-500 text-white hover:shadow-md"
+                }`}
+              >
+                {isFiltered ? (
+                  <>
+                    <FaTimes className="mr-2" /> Remove Filters
+                  </>
+                ) : (
+                  <>
+                    <FaSearch className="mr-2" /> Filter & Search
+                  </>
+                )}
+              </button>
+              <button
+                onClick={printAllOrders}
+                className="ml-2 px-6 py-3 bg-gradient-to-r from-purple-500 to-pink-500 text-white rounded-lg flex items-center hover:shadow-md"
+              >
+                <FaPrint className="mr-2" /> Print All
+              </button>
+            </div>
+          </div>
+          <div className="space-y-3 max-h-[40vh] overflow-y-auto pr-2">
+            {filteredOrders.length > 0 ? (
+              <>
+                {filteredOrders.map((order, index) => (
+                  <div
+                    key={`${order.id}-${index}`}
+                    onClick={() => fetchOrderById(order.id)}
+                    className="p-4 border border-gray-200 rounded-lg bg-gray-50 cursor-pointer hover:bg-gray-100 transition-colors"
+                  >
+                    <div className="flex justify-between items-center">
+                      <div>
+                        <p className="font-bold text-lg text-black">Order #{order.id}</p>
+                        <p className="text-sm text-gray-800">
+                          {new Date(order.date).toLocaleDateString('en-GB')} {new Date(order.date).toLocaleTimeString()}
+                        </p>
+                      </div>
+                      <div className="text-right">
+                        <p className="font-bold text-lg text-black">{order.total} IQD</p>
+                        <p className="text-sm text-gray-800">{order.items.length} items</p>
+                        <p className="text-sm text-gray-800">Delivery: {order.deliveryFee || 0} IQD</p>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+                <div className="p-4 border-t border-gray-200 mt-4 bg-gray-50">
+                  <div className="flex justify-between items-center font-bold text-black">
+                    <span>Total Orders: {filteredOrders.length}</span>
+                    <span>Total Delivery Fee: {filteredOrders.reduce((sum, order) => sum + (order.deliveryFee || 0), 0)} IQD</span>
+                    <span>Total Sales: {filteredOrders.reduce((sum, order) => sum + order.total, 0)} IQD</span>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <p className="text-center text-gray-800 py-4">No orders found for this date range.</p>
+            )}
+          </div>
+        </div>
+      </div>
+      {/* SALES CHART SECTION */}
+      <div className="container mx-auto px-4 py-8">
+        <div className="bg-white p-6 rounded-xl shadow-sm">
+          <h2 className="text-2xl font-bold mb-6 flex items-center text-black">
+            <FaChartPie className="mr-3 text-yellow-600" /> Sales Overview
+          </h2>
+          <div className="mb-4">
+            <label className="block text-black font-medium mb-2">Select Month</label>
+            <select
+              value={selectedMonth}
+              onChange={(e) => setSelectedMonth(parseInt(e.target.value))}
+              className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 text-black"
+            >
+              {months.map((month, index) => (
+                <option key={index} value={index}>{month}</option>
+              ))}
+            </select>
+          </div>
+          <div className="w-full md:w-3/4 mx-auto mb-8">
+            <Bar
+              data={getBarChartData()}
+              options={{
+                responsive: true,
+                plugins: {
+                  legend: {
+                    position: 'top',
+                  },
+                  title: {
+                    display: true,
+                    text: `Sales for ${months[selectedMonth]} (Bar Chart)`,
+                    color: 'black',
+                    font: {
+                      size: 16,
+                    },
+                  },
+                },
+              }}
+            />
+          </div>
+          <div className="w-full md:w-3/4 mx-auto">
+            <Pie
+              data={getMonthlySalesChartData()}
+              options={{
+                responsive: true,
+                plugins: {
+                  legend: {
+                    position: 'right',
+                  },
+                  title: {
+                    display: true,
+                    text: `Sales for ${months[selectedMonth]} (Pie Chart)`,
+                    color: 'black',
+                    font: {
+                      size: 16,
+                    },
+                  },
+                  tooltip: {
+                    callbacks: {
+                      label: function(context) {
+                        const label = context.label || '';
+                        const value = context.raw || 0;
+                        return `${label}: ${value} IQD`;
+                      }
+                    }
+                  }
+                },
+              }}
+            />
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
+
+// AdminView, StartersAdminView, DrinksAdminView, MenuAdminView, EditForm, ItemDisplay components remain the same as in your original code.
 
 // AdminView component
 function AdminView({
