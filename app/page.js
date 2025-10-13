@@ -1,8 +1,9 @@
 "use client";
 import { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import toast from "react-hot-toast";
-import { db } from "@/lib/firebase";
+import toast, { Toaster } from "react-hot-toast";
+import { db, auth } from "@/lib/firebase";
+import { signOut } from "firebase/auth";
 import {
   collection,
   getDocs,
@@ -13,6 +14,8 @@ import {
   deleteDoc,
   query,
   where,
+  orderBy,
+  limit,
 } from "firebase/firestore";
 import {
   FaPlus,
@@ -30,24 +33,24 @@ import {
   FaHamburger,
   FaDrumstickBite,
   FaMugHot,
-  FaToggleOn,
-  FaToggleOff,
   FaSave,
   FaTimes,
-  FaRedo,
   FaCalendarAlt,
   FaSearch,
   FaChartBar,
   FaChartPie,
+  FaSignOutAlt,
+  FaExclamationCircle,
 } from "react-icons/fa";
 import { Chart as ChartJS, ArcElement, Tooltip, Legend, CategoryScale, LinearScale, Title, BarElement } from "chart.js";
 import { Pie, Bar } from "react-chartjs-2";
+import LoginPage from "./LoginPage";
 
 // Register the required components
 ChartJS.register(ArcElement, Tooltip, Legend, CategoryScale, LinearScale, Title, BarElement);
 
 export default function RestaurantPOS() {
-  // State declarations
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
   const [menu, setMenu] = useState([]);
   const [starters, setStarters] = useState([]);
@@ -72,16 +75,18 @@ export default function RestaurantPOS() {
   const [fetchedOrder, setFetchedOrder] = useState(null);
   const [orderIdSearch, setOrderIdSearch] = useState("");
   const [selectedMonth, setSelectedMonth] = useState(new Date().getMonth());
+  const [selectedYear, setSelectedYear] = useState(new Date().getFullYear());
   const [salesData, setSalesData] = useState({});
   const [monthlySales, setMonthlySales] = useState({});
   const [isFiltered, setIsFiltered] = useState(false);
+  const [error, setError] = useState(null);
   const cartRef = useRef(null);
 
   const months = [
     "January", "February", "March", "April", "May", "June",
     "July", "August", "September", "October", "November", "December"
   ];
-
+  const years = Array.from({ length: 11 }, (_, i) => 2025 + i);
   const colors = [
     '#FF6384', '#36A2EB', '#FFCE56', '#4BC0C0', '#9966FF',
     '#FF9F40', '#8AC24A', '#FF6B6B', '#4ECDC4', '#45B7D1',
@@ -89,33 +94,44 @@ export default function RestaurantPOS() {
     '#A5DD9B', '#F9C74F', '#90BE6D', '#43AA8B', '#577590'
   ];
 
-  // Load next order ID from localStorage
-  useEffect(() => {
-    const savedOrderId = localStorage.getItem("nextOrderId");
-    if (savedOrderId) {
-      setNextOrderId(parseInt(savedOrderId));
-    } else {
-      localStorage.setItem("nextOrderId", "1");
-    }
-  }, []);
-
-  // Generate the next order ID
-  const generateOrderId = () => {
-    const currentId = nextOrderId;
-    const newId = currentId + 1;
-    setNextOrderId(newId);
-    localStorage.setItem("nextOrderId", newId.toString());
-    return newId.toString().padStart(3, '0');
+  // Show error message
+  const showError = (message) => {
+    setError(message);
+    setTimeout(() => setError(null), 5000);
   };
 
-  // Reset order ID
-  const resetOrderId = () => {
-    const confirmReset = window.confirm("Are you sure you want to reset the order ID?");
-    if (confirmReset) {
-      setNextOrderId(1);
-      localStorage.setItem("nextOrderId", "1");
-      toast.success("Order ID reset to 001!");
+  // Logout
+  const handleLogout = async () => {
+    try {
+      await signOut(auth);
+      setIsLoggedIn(false);
+      toast.success("Logged out successfully!");
+    } catch (err) {
+      showError("Failed to logout. Please try again.");
     }
+  };
+
+  // Fetch the latest order ID from Firebase
+  const fetchLatestOrderId = async () => {
+    try {
+      const ordersRef = collection(db, "orders");
+      const q = query(ordersRef, orderBy("id", "desc"), limit(1));
+      const snapshot = await getDocs(q);
+      if (!snapshot.empty) {
+        const latestOrder = snapshot.docs[0].data();
+        const latestId = parseInt(latestOrder.id);
+        setNextOrderId(latestId + 1);
+      } else {
+        setNextOrderId(1);
+      }
+    } catch (error) {
+      showError("Failed to fetch latest order ID. Please refresh the page.");
+    }
+  };
+
+  // Generate the next order ID (3 digits, e.g. 001)
+  const generateOrderId = () => {
+    return nextOrderId.toString().padStart(3, '0');
   };
 
   // Categories for the menu
@@ -138,27 +154,35 @@ export default function RestaurantPOS() {
   useEffect(() => {
     const fetchData = async () => {
       try {
+        setIsFetching(true);
         const menuSnapshot = await getDocs(collection(db, "menu"));
         const menuData = menuSnapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
         setMenu(menuData);
+
         const startersSnapshot = await getDocs(collection(db, "starters"));
         const startersData = startersSnapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
         setStarters(startersData);
+
         const drinksSnapshot = await getDocs(collection(db, "drinks"));
         const drinksData = drinksSnapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
         setDrinks(drinksData);
-        const ordersSnapshot = await getDocs(collection(db, "orders"));
+
+        const ordersSnapshot = await getDocs(query(collection(db, "orders"), orderBy("id", "desc")));
         const ordersData = ordersSnapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
         setOrders(ordersData);
         setFilteredOrders(ordersData);
+
         // Load admin state from localStorage
         const savedAdminState = localStorage.getItem("isAdmin");
         if (savedAdminState) {
           setIsAdmin(savedAdminState === "true");
         }
+
+        await fetchLatestOrderId();
       } catch (error) {
-        console.error("Error fetching data:", error);
-        toast.error("Failed to fetch data from Firebase.");
+        showError("Failed to fetch data. Please refresh the page.");
+      } finally {
+        setIsFetching(false);
       }
     };
     fetchData();
@@ -208,9 +232,7 @@ export default function RestaurantPOS() {
   // Add item to cart
   const addToCart = (item) => {
     if (item.disabled) {
-      toast.error("This item is currently unavailable.", {
-        icon: <FaBoxOpen className="text-yellow-500" />,
-      });
+      showError("This item is currently unavailable.");
       return;
     }
     const size = selectedSizes[item.id] || (item.sizes ? item.sizes[0].name : null);
@@ -225,17 +247,13 @@ export default function RestaurantPOS() {
         return [...prev, { ...item, selectedSize: size, price, quantityInCart: 1 }];
       }
     });
-    toast.success(`${item.name} ${size ? `(${size})` : ""} added to cart!`, {
-      icon: <FaPlus className="text-green-500" />,
-    });
+    toast.success(`${item.name} ${size ? `(${size})` : ""} added to cart!`);
   };
 
   // Add starter or drink to cart
   const addStarterOrDrinkToCart = (item) => {
     if (item.disabled) {
-      toast.error("This item is currently unavailable.", {
-        icon: <FaBoxOpen className="text-yellow-500" />,
-      });
+      showError("This item is currently unavailable.");
       return;
     }
     setCart((prev) => {
@@ -248,17 +266,13 @@ export default function RestaurantPOS() {
         return [...prev, { ...item, quantityInCart: 1 }];
       }
     });
-    toast.success(`${item.name} added to cart!`, {
-      icon: <FaPlus className="text-green-500" />,
-    });
+    toast.success(`${item.name} added to cart!`);
   };
 
   // Remove item from cart
   const removeFromCart = (id, size) => {
     setCart((prev) => prev.filter((item) => !(item.id === id && item.selectedSize === size)));
-    toast.error("Item removed from cart.", {
-      icon: <FaTrash className="text-red-500" />,
-    });
+    toast.error("Item removed from cart.");
   };
 
   // Update cart quantity
@@ -277,9 +291,7 @@ export default function RestaurantPOS() {
   // Place or update order
   const placeOrUpdateOrder = async () => {
     if (cart.length === 0) {
-      toast.error("Your cart is empty!", {
-        icon: <FaBoxOpen className="text-yellow-500" />,
-      });
+      showError("Your cart is empty!");
       return;
     }
     setIsPrinting(true);
@@ -287,7 +299,6 @@ export default function RestaurantPOS() {
       const subtotal = cart.reduce((sum, item) => sum + item.price * item.quantityInCart, 0);
       const fee = parseFloat(deliveryFee) || 0;
       const total = subtotal + fee;
-
       if (isEditingOrder && fetchedOrder) {
         // Update existing order
         const ordersRef = collection(db, "orders");
@@ -301,9 +312,7 @@ export default function RestaurantPOS() {
             deliveryFee: fee,
             total,
           });
-          toast.success(`Order #${fetchedOrder.id} updated successfully! 🎉`, {
-            icon: <FaShoppingCart className="text-green-500" />,
-          });
+          toast.success(`Order #${fetchedOrder.id} updated successfully! 🎉`);
           printReceipt({ ...fetchedOrder, items: cart, subtotal, deliveryFee: fee, total });
           setOrders((prev) =>
             prev.map((o) =>
@@ -324,7 +333,7 @@ export default function RestaurantPOS() {
           setFetchedOrder(null);
           setDeliveryFee("");
         } else {
-          toast.error("Order not found.");
+          showError("Order not found.");
         }
       } else {
         // Place new order
@@ -340,61 +349,15 @@ export default function RestaurantPOS() {
         setOrders((prev) => [newOrder, ...prev]);
         setFilteredOrders((prev) => [newOrder, ...prev]);
         printReceipt(newOrder);
-        toast.success(`Order #${newOrder.id} placed successfully! 🎉`, {
-          icon: <FaShoppingCart className="text-green-500" />,
-        });
+        toast.success(`Order #${newOrder.id} placed successfully! 🎉`);
         setCart([]);
         setDeliveryFee("");
+        setNextOrderId(nextOrderId + 1);
       }
     } catch (error) {
-      console.error("Error placing/updating order:", error);
-      toast.error("Failed to place/update order.");
+      showError("Failed to place/update order. Please try again.");
     } finally {
       setIsPrinting(false);
-    }
-  };
-
-  // Toggle item availability
-  const toggleItemDisabled = async (collectionName, id) => {
-    if (isToggling) return;
-    setIsToggling(true);
-    try {
-      const itemRef = doc(db, collectionName, String(id));
-      const docSnap = await getDoc(itemRef);
-      if (!docSnap.exists()) {
-        toast.error("Item not found in database.");
-        setIsToggling(false);
-        return;
-      }
-      let item;
-      let setStateFunction;
-      if (collectionName === "menu") {
-        item = menu.find((i) => i.id === id);
-        setStateFunction = setMenu;
-      } else if (collectionName === "starters") {
-        item = starters.find((i) => i.id === id);
-        setStateFunction = setStarters;
-      } else if (collectionName === "drinks") {
-        item = drinks.find((i) => i.id === id);
-        setStateFunction = setDrinks;
-      }
-      if (!item) {
-        setIsToggling(false);
-        return;
-      }
-      const newDisabledState = !item.disabled;
-      await updateDoc(itemRef, { disabled: newDisabledState });
-      setStateFunction((prev) =>
-        prev.map((item) =>
-          item.id === id ? { ...item, disabled: newDisabledState } : item
-        )
-      );
-      toast.success(`Item ${newDisabledState ? "disabled" : "enabled"} successfully!`);
-    } catch (error) {
-      console.error("Error toggling item:", error);
-      toast.error("Failed to toggle item.");
-    } finally {
-      setIsToggling(false);
     }
   };
 
@@ -429,9 +392,7 @@ export default function RestaurantPOS() {
       prev.map((item) => (item.id === id ? updatedItem : item))
     );
     setEditingItem(null);
-    toast.success("Item updated!", {
-      icon: <FaSave className="text-blue-500" />,
-    });
+    toast.success("Item updated!");
   };
 
   // Start editing a starter
@@ -451,9 +412,7 @@ export default function RestaurantPOS() {
       )
     );
     setEditingItem(null);
-    toast.success("Starter updated!", {
-      icon: <FaSave className="text-blue-500" />,
-    });
+    toast.success("Starter updated!");
   };
 
   // Start editing a drink
@@ -473,9 +432,7 @@ export default function RestaurantPOS() {
       )
     );
     setEditingItem(null);
-    toast.success("Drink updated!", {
-      icon: <FaSave className="text-blue-500" />,
-    });
+    toast.success("Drink updated!");
   };
 
   // Print receipt
@@ -569,7 +526,7 @@ export default function RestaurantPOS() {
   const printAllOrders = () => {
     const ordersToPrint = filteredOrders.length > 0 ? filteredOrders : orders;
     if (ordersToPrint.length === 0) {
-      toast.error("No orders to print.");
+      showError("No orders to print.");
       return;
     }
     const printWindow = window.open('', '_blank');
@@ -672,24 +629,7 @@ export default function RestaurantPOS() {
       setFetchedOrder(order);
       toast.success(`Order #${orderId} loaded for editing!`);
     } else {
-      toast.error("Order not found.");
-    }
-  };
-
-  // Clear daily orders
-  const clearDailyOrders = async () => {
-    try {
-      const ordersRef = collection(db, "orders");
-      const snapshot = await getDocs(ordersRef);
-      snapshot.forEach(async (doc) => {
-        await deleteDoc(doc.ref);
-      });
-      setOrders([]);
-      setFilteredOrders([]);
-      toast.success("All orders cleared for the day!");
-    } catch (error) {
-      console.error("Error clearing orders:", error);
-      toast.error("Failed to clear orders.");
+      showError("Order not found.");
     }
   };
 
@@ -703,25 +643,20 @@ export default function RestaurantPOS() {
       setIsFiltered(false);
       return;
     }
-
     if (!fromDate && !toDate && !orderIdSearch) {
       setFilteredOrders(orders);
       return;
     }
-
     const [fromDay, fromMonth, fromYear] = fromDate.split('/').map(Number);
     const [toDay, toMonth, toYear] = toDate.split('/').map(Number);
-
     const from = fromDate ? new Date(fromYear, fromMonth - 1, fromDay) : new Date(0);
     const to = toDate ? new Date(toYear, toMonth - 1, toDay, 23, 59, 59) : new Date();
-
     const filtered = orders.filter((order) => {
       const orderDate = new Date(order.date);
       const matchesDate = orderDate >= from && orderDate <= to;
       const matchesId = orderIdSearch ? order.id === orderIdSearch : true;
       return matchesDate && matchesId;
     });
-
     setFilteredOrders(filtered);
     setIsFiltered(true);
   };
@@ -735,21 +670,17 @@ export default function RestaurantPOS() {
 
   // Chart data for monthly sales
   const getMonthlySalesChartData = () => {
-    const monthKey = `${new Date().getFullYear()}-${selectedMonth}`;
+    const monthKey = `${selectedYear}-${selectedMonth}`;
     const monthData = monthlySales[monthKey] || { food: {}, drinks: {}, delivery: 0, total: 0 };
-
     const foodLabels = Object.keys(monthData.food);
     const foodValues = Object.values(monthData.food);
     const drinkLabels = Object.keys(monthData.drinks);
     const drinkValues = Object.values(monthData.drinks);
-
     const labels = [...foodLabels, ...drinkLabels, "Delivery Fee"];
     const data = [...foodValues, ...drinkValues, monthData.delivery];
-
     const backgroundColors = foodLabels.map((_, index) => colors[index % colors.length])
       .concat(drinkLabels.map((_, index) => colors[(index + foodLabels.length) % colors.length]))
       .concat(['#FFCE56']);
-
     return {
       labels,
       datasets: [
@@ -764,21 +695,17 @@ export default function RestaurantPOS() {
   };
 
   const getBarChartData = () => {
-    const monthKey = `${new Date().getFullYear()}-${selectedMonth}`;
+    const monthKey = `${selectedYear}-${selectedMonth}`;
     const monthData = monthlySales[monthKey] || { food: {}, drinks: {}, delivery: 0, total: 0 };
-
     const foodLabels = Object.keys(monthData.food);
     const foodValues = Object.values(monthData.food);
     const drinkLabels = Object.keys(monthData.drinks);
     const drinkValues = Object.values(monthData.drinks);
-
     const labels = [...foodLabels, ...drinkLabels, "Delivery Fee"];
     const data = [...foodValues, ...drinkValues, monthData.delivery];
-
     const backgroundColors = foodLabels.map((_, index) => colors[index % colors.length])
       .concat(drinkLabels.map((_, index) => colors[(index + foodLabels.length) % colors.length]))
       .concat(['#FFCE56']);
-
     return {
       labels,
       datasets: [
@@ -793,25 +720,45 @@ export default function RestaurantPOS() {
     };
   };
 
+  if (!isLoggedIn) {
+    return <LoginPage onLogin={() => setIsLoggedIn(true)} />;
+  }
+
   return (
     <div className="min-h-screen bg-gray-50">
+      <Toaster position="bottom-left" />
+      {error && (
+        <div className="fixed top-4 left-4 z-50 bg-red-500 text-white px-6 py-3 rounded-lg shadow-lg flex items-center space-x-2">
+          <FaExclamationCircle className="text-xl" />
+          <span>{error}</span>
+        </div>
+      )}
       <header className="bg-white shadow-sm sticky top-0 z-20">
         <div className="container mx-auto px-4 py-4 flex justify-between items-center">
           <img src={`/Images/logo.jpg`} className="w-40 h-20 object-contain rounded-lg shadow-md border border-gray-200" alt="Pizza Master Logo" />
           <h1 className="text-3xl font-bold text-black flex items-center">
             <FaUtensils className="mr-2 text-orange-600" /> Pizza Master
           </h1>
-          <button
-            onClick={toggleAdminView}
-            className={`px-6 py-3 rounded-lg text-white font-medium flex items-center shadow-sm transition-all ${
-              isAdmin
-                ? "bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600"
-                : "bg-gradient-to-r from-teal-500 to-blue-500 hover:from-teal-600 hover:to-blue-600"
-            }`}
-          >
-            {isAdmin ? <FaUtensils className="mr-2" /> : <FaEdit className="mr-2" />}
-            {isAdmin ? "Customer View" : "Admin Panel"}
-          </button>
+          <div className="flex items-center space-x-4">
+            <button
+              onClick={handleLogout}
+              className="px-4 py-2 bg-red-500 text-white rounded-lg flex items-center space-x-2 hover:bg-red-600 transition-colors"
+            >
+              <FaSignOutAlt className="text-lg" />
+              <span>Logout</span>
+            </button>
+            <button
+              onClick={toggleAdminView}
+              className={`px-6 py-3 rounded-lg text-white font-medium flex items-center shadow-sm transition-all ${
+                isAdmin
+                  ? "bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600"
+                  : "bg-gradient-to-r from-teal-500 to-blue-500 hover:from-teal-600 hover:to-blue-600"
+              }`}
+            >
+              {isAdmin ? <FaUtensils className="mr-2" /> : <FaEdit className="mr-2" />}
+              {isAdmin ? "Customer View" : "Admin Panel"}
+            </button>
+          </div>
         </div>
       </header>
       <main className="container mx-auto px-4 py-8">
@@ -837,8 +784,6 @@ export default function RestaurantPOS() {
             saveEditingStarter={saveEditingStarter}
             startEditingDrink={startEditingDrink}
             saveEditingDrink={saveEditingDrink}
-            toggleItemDisabled={toggleItemDisabled}
-            clearDailyOrders={clearDailyOrders}
           />
         ) : (
           <div className="grid grid-cols-12 gap-8">
@@ -1077,7 +1022,7 @@ export default function RestaurantPOS() {
                         value={deliveryFee}
                         onChange={(e) => setDeliveryFee(e.target.value)}
                         placeholder="0"
-                        className="w-24 p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 text-right"
+                        className="w-24 p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 text-right text-black"
                       />
                     </div>
                     <div className="flex justify-between items-center mb-4">
@@ -1228,17 +1173,31 @@ export default function RestaurantPOS() {
           <h2 className="text-2xl font-bold mb-6 flex items-center text-black">
             <FaChartPie className="mr-3 text-yellow-600" /> Sales Overview
           </h2>
-          <div className="mb-4">
-            <label className="block text-black font-medium mb-2">Select Month</label>
-            <select
-              value={selectedMonth}
-              onChange={(e) => setSelectedMonth(parseInt(e.target.value))}
-              className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 text-black"
-            >
-              {months.map((month, index) => (
-                <option key={index} value={index}>{month}</option>
-              ))}
-            </select>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+            <div>
+              <label className="block text-black font-medium mb-2">Select Month</label>
+              <select
+                value={selectedMonth}
+                onChange={(e) => setSelectedMonth(parseInt(e.target.value))}
+                className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 text-black"
+              >
+                {months.map((month, index) => (
+                  <option key={index} value={index}>{month}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="block text-black font-medium mb-2">Select Year</label>
+              <select
+                value={selectedYear}
+                onChange={(e) => setSelectedYear(parseInt(e.target.value))}
+                className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 text-black"
+              >
+                {years.map((year) => (
+                  <option key={year} value={year}>{year}</option>
+                ))}
+              </select>
+            </div>
           </div>
           <div className="w-full md:w-3/4 mx-auto mb-8">
             <Bar
@@ -1251,7 +1210,7 @@ export default function RestaurantPOS() {
                   },
                   title: {
                     display: true,
-                    text: `Sales for ${months[selectedMonth]} (Bar Chart)`,
+                    text: `Sales for ${months[selectedMonth]} ${selectedYear} (Bar Chart)`,
                     color: 'black',
                     font: {
                       size: 16,
@@ -1272,7 +1231,7 @@ export default function RestaurantPOS() {
                   },
                   title: {
                     display: true,
-                    text: `Sales for ${months[selectedMonth]} (Pie Chart)`,
+                    text: `Sales for ${months[selectedMonth]} ${selectedYear} (Pie Chart)`,
                     color: 'black',
                     font: {
                       size: 16,
@@ -1297,8 +1256,6 @@ export default function RestaurantPOS() {
   );
 }
 
-// AdminView, StartersAdminView, DrinksAdminView, MenuAdminView, EditForm, ItemDisplay components remain the same as in your original code.
-
 // AdminView component
 function AdminView({
   categories,
@@ -1321,8 +1278,6 @@ function AdminView({
   saveEditingStarter,
   startEditingDrink,
   saveEditingDrink,
-  toggleItemDisabled,
-  clearDailyOrders,
 }) {
   return (
     <div className="grid grid-cols-1 gap-8">
@@ -1359,7 +1314,6 @@ function AdminView({
             startEditing={startEditingStarter}
             saveEditing={saveEditingStarter}
             setEditingItem={setEditingItem}
-            toggleItemDisabled={toggleItemDisabled}
           />
         ) : activeCategory === "Drinks" ? (
           <DrinksAdminView
@@ -1372,7 +1326,6 @@ function AdminView({
             startEditing={startEditingDrink}
             saveEditing={saveEditingDrink}
             setEditingItem={setEditingItem}
-            toggleItemDisabled={toggleItemDisabled}
           />
         ) : (
           <MenuAdminView
@@ -1386,16 +1339,9 @@ function AdminView({
             setEditSizePrices={setEditSizePrices}
             startEditing={startEditing}
             saveEditing={saveEditing}
-            toggleItemDisabled={toggleItemDisabled}
             setEditingItem={setEditingItem}
           />
         )}
-        <button
-          onClick={clearDailyOrders}
-          className="mt-6 px-4 py-2 bg-gradient-to-r from-red-500 to-pink-500 text-white rounded-lg flex items-center justify-center"
-        >
-          <FaTrash className="mr-2" /> Clear Daily Orders
-        </button>
       </div>
     </div>
   );
@@ -1412,14 +1358,13 @@ function StartersAdminView({
   startEditing,
   saveEditing,
   setEditingItem,
-  toggleItemDisabled,
 }) {
   return (
     <div className="space-y-3">
       <h3 className="text-xl font-semibold mb-4 text-black">Starters</h3>
       <div className="grid grid-cols-1  md:grid-cols-2 lg:grid-cols-3 gap-4">
         {items.map((item) => (
-          <div key={item.id} className={`p-4 border border-gray-200 rounded-lg bg-white shadow-sm ${item.disabled ? "opacity-60" : ""}`}>
+          <div key={item.id} className="p-4 border border-gray-200 rounded-lg bg-white shadow-sm">
             {editingItem === item.id ? (
               <EditForm
                 editName={editName}
@@ -1433,7 +1378,6 @@ function StartersAdminView({
               <ItemDisplay
                 item={item}
                 onEdit={() => startEditing(item)}
-                onToggle={() => toggleItemDisabled("starters", item.id)}
                 isMenuItem={false}
               />
             )}
@@ -1455,14 +1399,13 @@ function DrinksAdminView({
   startEditing,
   saveEditing,
   setEditingItem,
-  toggleItemDisabled,
 }) {
   return (
     <div className="space-y-4">
       <h3 className="text-xl font-semibold mb-4 text-black">Drinks</h3>
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         {items.map((item) => (
-          <div key={item.id} className={`p-4 border border-gray-200 rounded-lg bg-white shadow-sm ${item.disabled ? "opacity-60" : ""}`}>
+          <div key={item.id} className="p-4 border border-gray-200 rounded-lg bg-white shadow-sm">
             {editingItem === item.id ? (
               <EditForm
                 editName={editName}
@@ -1476,7 +1419,6 @@ function DrinksAdminView({
               <ItemDisplay
                 item={item}
                 onEdit={() => startEditing(item)}
-                onToggle={() => toggleItemDisabled("drinks", item.id)}
                 isMenuItem={false}
               />
             )}
@@ -1499,14 +1441,13 @@ function MenuAdminView({
   setEditSizePrices,
   startEditing,
   saveEditing,
-  toggleItemDisabled,
   setEditingItem,
 }) {
   return (
     <div className="space-y-5">
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {items.map((item) => (
-          <div key={item.id} className={`p-4 border-2 rounded-xl bg-white shadow-sm ${item.disabled ? "opacity-60" : ""}`}>
+          <div key={item.id} className="p-4 border-2 rounded-xl bg-white shadow-sm">
             {editingItem === item.id ? (
               <EditForm
                 editName={editName}
@@ -1523,7 +1464,6 @@ function MenuAdminView({
               <ItemDisplay
                 item={item}
                 onEdit={() => startEditing(item)}
-                onToggle={() => toggleItemDisabled("menu", item.id)}
                 isMenuItem={true}
               />
             )}
@@ -1606,19 +1546,11 @@ function EditForm({
 }
 
 // ItemDisplay component
-function ItemDisplay({ item, onEdit, onToggle, isMenuItem }) {
+function ItemDisplay({ item, onEdit, isMenuItem }) {
   return (
     <>
       <div className="flex justify-between items-start mb-2">
         <h3 className="font-bold text-lg text-gray-800 flex-1">{item.name}</h3>
-        {/* <button
-          onClick={onToggle}
-          className={`p-3 rounded-lg text-white flex items-center justify-center shadow-sm transition-all transform active:scale-95 ${
-            item.disabled ? "bg-red-500 hover:bg-red-600" : "bg-green-500 hover:bg-green-600"
-          }`}
-        >
-          {item.disabled ? <FaToggleOff className="text-lg" /> : <FaToggleOn className="text-lg" />}
-        </button> */}
       </div>
       {isMenuItem && item.sizes ? (
         <div className="flex flex-wrap gap-2 mb-4">
